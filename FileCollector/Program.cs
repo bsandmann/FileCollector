@@ -2,13 +2,14 @@
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Collections.Generic;
 using System.Text;
-using System.Text.RegularExpressions;
 
 class Program
 {
     const double TOKENS_PER_CHAR = 0.3;
+    static List<string> ignoreFolders;
 
     static void Main(string[] args)
     {
@@ -21,13 +22,18 @@ class Program
 
         string jsonString = File.ReadAllText(appSettingsPath);
         var jsonDocument = JsonDocument.Parse(jsonString);
+        var root = jsonDocument.RootElement;
 
-        string solutionFolder = jsonDocument.RootElement.GetProperty("SolutionFolder").GetString();
+        string solutionFolder = root.GetProperty("SolutionFolder").GetString();
         if (string.IsNullOrEmpty(solutionFolder))
         {
             Console.WriteLine("SolutionFolder not specified in appsettings.json");
             return;
         }
+
+        ignoreFolders = root.TryGetProperty("IgnoreFolders", out var ignoreFoldersElement)
+            ? ignoreFoldersElement.EnumerateArray().Select(e => e.GetString()).ToList()
+            : new List<string>();
 
         int totalTokens = ProcessSolution(solutionFolder);
 
@@ -46,19 +52,19 @@ class Program
         foreach (var projectFile in projectFiles)
         {
             string projectName = Path.GetFileNameWithoutExtension(projectFile);
-
+            
             if (projectName.Contains("Test", StringComparison.OrdinalIgnoreCase))
                 continue;
 
             string projectFolder = Path.GetDirectoryName(projectFile);
 
-            totalTokens += ProcessProject(projectName, projectFolder);
+            totalTokens += ProcessProject(solutionFolder, projectName, projectFolder);
         }
 
         return totalTokens;
     }
 
-    static int ProcessProject(string projectName, string projectFolder)
+    static int ProcessProject(string solutionFolder, string projectName, string projectFolder)
     {
         int projectTokens = 0;
         var fileTypes = new[] { "cs", "cshtml", "razor" };
@@ -68,8 +74,7 @@ class Program
             var files = Directory.GetFiles(projectFolder, $"*.{fileType}", SearchOption.AllDirectories)
                 .Where(f => !f.Contains("\\Migrations\\", StringComparison.OrdinalIgnoreCase) &&
                             !Path.GetFileName(f).Contains("Assembly", StringComparison.OrdinalIgnoreCase) &&
-                            !Path.GetFileName(f).Contains("GlobalUsings", StringComparison.OrdinalIgnoreCase)
-                );
+                            !ShouldIgnoreFile(solutionFolder, f));
 
             if (!files.Any()) continue;
 
@@ -98,9 +103,8 @@ class Program
                             insideNamespace = true;
                             continue;
                         }
-
                         if (insideNamespace && trimmedLine == "{") continue;
-
+                        
                         writer.WriteLine(line);
                         processedContent.AppendLine(line);
                     }
@@ -117,6 +121,12 @@ class Program
         }
 
         return projectTokens;
+    }
+
+    static bool ShouldIgnoreFile(string solutionFolder, string filePath)
+    {
+        string relativePath = Path.GetRelativePath(solutionFolder, filePath);
+        return ignoreFolders.Any(folder => relativePath.StartsWith(folder, StringComparison.OrdinalIgnoreCase));
     }
 
     static string RemoveComments(string content)
